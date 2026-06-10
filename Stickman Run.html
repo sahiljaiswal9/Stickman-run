@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stickman Run: Combat Evolution</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #050505; font-family: 'Orbitron', sans-serif; }
+        canvas { display: block; }
+
+        /* UI Overlay */
+        #game-ui {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; user-select: none;
+        }
+
+        .screen {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; 
+            background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px);
+            color: #00fff2; pointer-events: auto; z-index: 10;
+        }
+
+        .hidden { display: none !important; }
+
+        h1 { font-size: 4rem; text-shadow: 0 0 20px #00fff2; margin: 0; }
+        p { color: #888; letter-spacing: 2px; }
+
+        .btn {
+            background: transparent; border: 2px solid #00fff2; color: #00fff2;
+            padding: 15px 50px; font-size: 1.2rem; cursor: pointer;
+            transition: 0.3s; margin-top: 20px; text-transform: uppercase;
+        }
+        .btn:hover { background: #00fff2; color: #000; box-shadow: 0 0 30px #00fff2; }
+
+        /* HUD */
+        #hud {
+            position: absolute; top: 20px; left: 20px; width: 300px;
+            pointer-events: none;
+        }
+        .stat-row { margin-bottom: 10px; }
+        .label { font-size: 0.7rem; color: #00fff2; margin-bottom: 3px; }
+        .bar-bg { background: rgba(0, 255, 242, 0.1); height: 8px; border: 1px solid #00fff2; border-radius: 4px; }
+        .bar-fill { height: 100%; width: 100%; background: #00fff2; transition: width 0.1s; box-shadow: 0 0 10px #00fff2; }
+
+        #damage-overlay {
+            position: absolute; inset: 0; background: rgba(255, 0, 0, 0.3);
+            opacity: 0; pointer-events: none; transition: opacity 0.1s;
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+    <div id="damage-overlay"></div>
+
+    <div id="game-ui">
+        <div id="hud" class="hidden">
+            <div id="score" style="font-size: 1.5rem; margin-bottom: 15px;">TIME: 0.0s</div>
+            <div class="stat-row">
+                <div class="label">ENERGY SHIELD</div>
+                <div class="bar-bg"><div id="shield-bar" class="bar-fill"></div></div>
+            </div>
+            <div class="stat-row">
+                <div class="label">STAMINA (DASH)</div>
+                <div class="bar-bg"><div id="stamina-bar" class="bar-fill" style="background: #ffea00; box-shadow: 0 0 10px #ffea00;"></div></div>
+            </div>
+            <div class="stat-row">
+                <div class="label">COMBAT AMMO</div>
+                <div class="bar-bg"><div id="ammo-bar" class="bar-fill" style="background: #ff0055; box-shadow: 0 0 10px #ff0055;"></div></div>
+            </div>
+        </div>
+
+        <div id="start-screen" class="screen">
+            <h1>STICKMAN RUN</h1>
+            <p>ADVANCED COMBAT SYSTEM v2.0</p>
+            <div style="text-align: center; font-size: 0.8rem; color: #555; margin: 10px;">
+                STICKMAN USES GUN, SHIELD, AND DASH.<br>
+                TOUCH HIM WHEN HIS SHIELD IS DOWN.
+            </div>
+            <button class="btn" onclick="Engine.start()">INITIALIZE</button>
+        </div>
+
+        <div id="death-screen" class="screen hidden">
+            <h1 style="color: #ff0055; text-shadow: 0 0 20px #ff0055;">CAPTURED</h1>
+            <p id="final-stats"></p>
+            <button class="btn" onclick="location.reload()">REBOOT</button>
+        </div>
+    </div>
+
+<script>
+/**
+ * CORE ENGINE
+ */
+const Engine = {
+    active: false,
+    clock: new THREE.Clock(),
+    bullets: [],
+    
+    init() {
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 1000);
+        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(this.renderer.domElement);
+
+        // Lighting
+        const ambient = new THREE.AmbientLight(0x404040, 2);
+        this.scene.add(ambient);
+        const point = new THREE.PointLight(0x00fff2, 1, 100);
+        point.position.set(0, 20, 0);
+        this.scene.add(point);
+
+        // Grid & Floor
+        this.createEnvironment();
+
+        // Stickman
+        this.stickman = new StickmanAI(this.scene);
+
+        // Raycasting
+        this.raycaster = new THREE.Raycaster();
+        this.mouse = new THREE.Vector2();
+        this.mouse3D = new THREE.Vector3();
+        
+        window.addEventListener('mousemove', (e) => {
+            this.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            this.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        this.camera.position.set(0, 50, 30);
+        this.camera.lookAt(0, 0, 0);
+
+        window.addEventListener('resize', () => this.resize());
+    },
+
+    createEnvironment() {
+        // Floor Box
+        const floorGeo = new THREE.PlaneGeometry(80, 50);
+        const floorMat = new THREE.MeshPhongMaterial({ 
+            color: 0x050505, 
+            shininess: 100,
+            specular: 0x00fff2 
+        });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        this.scene.add(floor);
+
+        const grid = new THREE.GridHelper(80, 40, 0x00fff2, 0x111111);
+        grid.position.y = 0.05;
+        this.scene.add(grid);
+
+        // Boundaries (Neon Walls)
+        const wallMat = new THREE.MeshBasicMaterial({ color: 0x00fff2, transparent: true, opacity: 0.1 });
+        const wallGeoH = new THREE.BoxGeometry(80, 2, 1);
+        const wallGeoV = new THREE.BoxGeometry(1, 2, 50);
+        
+        const w1 = new THREE.Mesh(wallGeoH, wallMat); w1.position.z = -25;
+        const w2 = new THREE.Mesh(wallGeoH, wallMat); w2.position.z = 25;
+        const w3 = new THREE.Mesh(wallGeoV, wallMat); w3.position.x = -40;
+        const w4 = new THREE.Mesh(wallGeoV, wallMat); w4.position.x = 40;
+        this.scene.add(w1, w2, w3, w4);
+    },
+
+    start() {
+        document.getElementById('start-screen').classList.add('hidden');
+        document.getElementById('hud').classList.remove('hidden');
+        this.active = true;
+        this.loop();
+    },
+
+    resize() {
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+    },
+
+    spawnBullet(pos, target) {
+        const geo = new THREE.SphereGeometry(0.2, 8, 8);
+        const mat = new THREE.MeshBasicMaterial({ color: 0xff0055 });
+        const bullet = new THREE.Mesh(geo, mat);
+        bullet.position.copy(pos);
+        
+        const dir = new THREE.Vector3().subVectors(target, pos).normalize();
+        this.bullets.push({ mesh: bullet, dir: dir, life: 100 });
+        this.scene.add(bullet);
+    },
+
+    loop() {
+        if (!this.active) return;
+        requestAnimationFrame(() => this.loop());
+        const delta = this.clock.getDelta();
+
+        // 1. Raycast mouse to floor
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const intersects = this.raycaster.intersectObjects(this.scene.children);
+        for (let i of intersects) {
+            if (i.object.type === "Mesh") {
+                this.mouse3D.copy(i.point);
+                break;
+            }
+        }
+
+        // 2. Update AI
+        this.stickman.update(this.mouse3D, delta);
+
+        // 3. Update Bullets
+        for (let i = this.bullets.length - 1; i >= 0; i--) {
+            const b = this.bullets[i];
+            b.mesh.position.add(b.dir.clone().multiplyScalar(1.2));
+            b.life--;
+
+            // Hit detection with Cursor
+            if (b.mesh.position.distanceTo(this.mouse3D) < 2) {
+                document.getElementById('damage-overlay').style.opacity = '1';
+                setTimeout(() => document.getElementById('damage-overlay').style.opacity = '0', 50);
+                b.life = 0;
+            }
+
+            if (b.life <= 0) {
+                this.scene.remove(b.mesh);
+                this.bullets.splice(i, 1);
+            }
+        }
+
+        // 4. Capture Check
+        if (this.stickman.group.position.distanceTo(this.mouse3D) < 1.5 && !this.stickman.shieldActive) {
+            this.gameOver();
+        }
+
+        // 5. Update UI
+        document.getElementById('score').innerText = `TIME: ${this.clock.elapsedTime.toFixed(1)}s`;
+        document.getElementById('shield-bar').style.width = this.stickman.shieldEnergy + '%';
+        document.getElementById('stamina-bar').style.width = this.stickman.stamina + '%';
+        document.getElementById('ammo-bar').style.width = this.stickman.ammo + '%';
+
+        this.renderer.render(this.scene, this.camera);
+    },
+
+    gameOver() {
+        this.active = false;
+        document.getElementById('death-screen').classList.remove('hidden');
+        document.getElementById('final-stats').innerText = `SYSTEM SURVIVAL TIME: ${this.clock.elapsedTime.toFixed(1)} SECONDS`;
+    }
+};
+
+/**
+ * STICKMAN AI CLASS
+ */
+class StickmanAI {
+    constructor(scene) {
+        this.group = new THREE.Group();
+        this.shieldEnergy = 100;
+        this.stamina = 100;
+        this.ammo = 100;
+        this.shieldActive = false;
+        this.velocity = new THREE.Vector3();
+        this.shootTimer = 0;
+
+        this.initMesh();
+        scene.add(this.group);
+    }
+
+    initMesh() {
+        const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x00fff2, emissiveIntensity: 0.5 });
+        
+        // Basic Stickman structure (2cm relative scale)
+        const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 1.2), mat);
+        torso.position.y = 1.2;
+        
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 16), mat);
+        head.position.y = 2.1;
+
+        // The Gun
+        const gunGeo = new THREE.BoxGeometry(0.2, 0.2, 0.8);
+        const gunMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+        this.gun = new THREE.Mesh(gunGeo, gunMat);
+        this.gun.position.set(0.4, 1.5, 0.4);
+        
+        // The Shield
+        const sGeo = new THREE.SphereGeometry(1.8, 16, 16);
+        const sMat = new THREE.MeshBasicMaterial({ color: 0x00fff2, wireframe: true, transparent: true, opacity: 0 });
+        this.shieldMesh = new THREE.Mesh(sGeo, sMat);
+        this.shieldMesh.position.y = 1.2;
+
+        this.group.add(torso, head, this.gun, this.shieldMesh);
+    }
+
+    update(cursorPos, delta) {
+        const dist = this.group.position.distanceTo(cursorPos);
+        const toCenter = new THREE.Vector3(0, 0, 0).sub(this.group.position).normalize();
+        const fromCursor = new THREE.Vector3().subVectors(this.group.position, cursorPos).normalize();
+
+        // 1. Movement Logic (Steering)
+        let desiredVel = new THREE.Vector3();
+        
+        if (dist < 18) {
+            // Flee from cursor
+            desiredVel.add(fromCursor.multiplyScalar(0.4));
+            // Preference for center (He tries to stay in the game area)
+            desiredVel.add(toCenter.multiplyScalar(0.1));
+        } else {
+            // Wander toward center
+            desiredVel.add(toCenter.multiplyScalar(0.05));
+        }
+
+        // Dash Tool
+        if (dist < 8 && this.stamina > 10) {
+            desiredVel.multiplyScalar(2.5);
+            this.stamina -= 0.8;
+        } else if (this.stamina < 100) {
+            this.stamina += 0.2;
+        }
+
+        this.velocity.lerp(desiredVel, 0.1);
+        this.group.position.add(this.velocity);
+
+        // Boundary Clamp
+        this.group.position.x = THREE.MathUtils.clamp(this.group.position.x, -38, 38);
+        this.group.position.z = THREE.MathUtils.clamp(this.group.position.z, -23, 23);
+
+        // 2. Gun Tool (Auto-Fire)
+        if (dist < 25 && this.ammo > 0) {
+            this.gun.lookAt(cursorPos);
+            this.shootTimer += delta;
+            if (this.shootTimer > 0.3) {
+                Engine.spawnBullet(this.group.position.clone().add(new THREE.Vector3(0,1.5,0)), cursorPos);
+                this.shootTimer = 0;
+                this.ammo -= 2;
+            }
+        } else if (this.ammo < 100) {
+            this.ammo += 0.1;
+        }
+
+        // 3. Shield Tool
+        if (dist < 5 && this.shieldEnergy > 0) {
+            this.shieldActive = true;
+            this.shieldEnergy -= 1.2;
+            this.shieldMesh.material.opacity = 0.3;
+            this.shieldMesh.rotation.y += 0.05;
+        } else {
+            this.shieldActive = false;
+            this.shieldMesh.material.opacity = 0;
+            if (this.shieldEnergy < 100) this.shieldEnergy += 0.3;
+        }
+
+        // Rotation
+        if (this.velocity.length() > 0.01) {
+            const angle = Math.atan2(this.velocity.x, this.velocity.z);
+            this.group.rotation.y = THREE.MathUtils.lerp(this.group.rotation.y, angle, 0.1);
+        }
+    }
+}
+
+// Initial Boot
+window.onload = () => Engine.init();
+</script>
+</body>
+</html>
